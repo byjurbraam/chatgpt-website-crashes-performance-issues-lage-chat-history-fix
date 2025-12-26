@@ -1,50 +1,31 @@
-/*
-  Made by: Jur Braam
-  LinkedIn: https://www.linkedin.com/in/jurbraam
+console.log('injected ChatGPT crash fix v4', location.href);
 
-  Not affiliated with OpenAI — this is a community helper.
-  If OpenAI requests removal, this project will be taken down immediately.
+(function () {
+  'use strict';
 
-  Purpose:
-  - prevent long chats from freezing by reducing DOM load
-  - keep full history safe in local cache
-  - lazy-load old messages only when needed
-  - avoid losing context or abandoning huge chats
-
-  100% client-side. No backend changes. No bypassing.
-  You can review, disable, or remove the script anytime.
-*/
-console.log('injected ChatGPT crash fix', location.href);
-
-// Simple marker so we know THIS version is injected
-console.log('injected ChatGPT crash fix v2', location.href);
-
-  // Prevent double-installation if this file is injected twice
   if (window.__CHATGPT_CRASH_FIX_INSTALLED__) {
-    console.log('[ChatGPT Crash Fix] Already installed, skipping second init');
+    console.log('[ChatGPT Crash Fix] Already installed, skipping');
     return;
   }
   window.__CHATGPT_CRASH_FIX_INSTALLED__ = true;
 
-  console.log('[ChatGPT Crash Fix] Initializing…');
+  console.log('[ChatGPT Crash Fix] Initializing...');
 
-  const STORAGE_KEY = 'chatgpt_pruneBigMessages';
+  var STORAGE_KEY = 'chatgpt_pruneBigMessages';
+  var KEEP_RECENT_MESSAGES = 10;
+  var MAX_CHARS_PER_PART = 800;
+  var MIN_TOTAL_LENGTH_FOR_TRIM = 5000;
 
-  // How many most recent messages to keep "untouched"
-  const KEEP_RECENT_MESSAGES = 10;
-
-  // Max characters we keep in each content "part" for older messages
-  const MAX_CHARS_PER_PART = 800;
-
-  // Only prune if a message total text is at least this big
-  const MIN_TOTAL_LENGTH_FOR_TRIM = 5000;
+  // New: only prune if the conversation is really large
+  var MIN_MESSAGES_FOR_PRUNE = 60;          // minimum number of messages
+  var MIN_CONVERSATION_LENGTH_FOR_PRUNE = 50000; // minimum total text length
 
   function pruningEnabled() {
     try {
-      const val = localStorage.getItem(STORAGE_KEY);
+      var val = localStorage.getItem(STORAGE_KEY);
       if (val === null) return true; // default = enabled
       return val === '1' || val === 'true';
-    } catch {
+    } catch (e) {
       return true;
     }
   }
@@ -52,39 +33,43 @@ console.log('injected ChatGPT crash fix v2', location.href);
   function isConversationUrl(url) {
     if (!url) return false;
     try {
-      const u = new URL(url, location.origin);
-      return u.pathname.startsWith('/backend-api/conversation');
-    } catch {
+      var u = new URL(url, location.origin);
+      return u.pathname && u.pathname.indexOf('/backend-api/conversation') === 0;
+    } catch (e) {
       return false;
     }
   }
 
-  /**
-   * Safely prune only the message *content*, never the mapping structure.
-   * We do NOT delete mapping entries, root, or parent/children — only shrink text.
-   */
   function pruneConversationPayload(payload) {
     if (!payload || typeof payload !== 'object') return payload;
     if (!payload.mapping || typeof payload.mapping !== 'object') return payload;
 
-    const mapping = payload.mapping;
-    const nodes = Object.values(mapping);
-    const messages = [];
+    var mapping = payload.mapping;
+    var nodeKeys = Object.keys(mapping);
+    var nodes = [];
+    for (var nk = 0; nk < nodeKeys.length; nk++) {
+      nodes.push(mapping[nodeKeys[nk]]);
+    }
 
-    for (const node of nodes) {
+    var messages = [];
+    var i, node;
+
+    for (i = 0; i < nodes.length; i++) {
+      node = nodes[i];
       if (!node || typeof node !== 'object') continue;
 
-      const msg = node.message;
+      var msg = node.message;
       if (!msg || !msg.content) continue;
 
-      const content = msg.content;
-      const parts = Array.isArray(content.parts) ? content.parts : null;
+      var content = msg.content;
+      var parts = Array.isArray(content.parts) ? content.parts : null;
       if (!parts || parts.length === 0) continue;
 
-      const createTime = typeof msg.create_time === 'number' ? msg.create_time : 0;
+      var createTime = typeof msg.create_time === 'number' ? msg.create_time : 0;
 
-      let totalLen = 0;
-      for (const p of parts) {
+      var totalLen = 0;
+      for (var pIndex = 0; pIndex < parts.length; pIndex++) {
+        var p = parts[pIndex];
         if (typeof p === 'string') {
           totalLen += p.length;
         } else if (p && typeof p === 'object' && typeof p.text === 'string') {
@@ -93,42 +78,60 @@ console.log('injected ChatGPT crash fix v2', location.href);
       }
 
       messages.push({
-        node,
-        msg,
-        content,
-        parts,
-        createTime,
-        totalLen
+        node: node,
+        msg: msg,
+        content: content,
+        parts: parts,
+        createTime: createTime,
+        totalLen: totalLen
       });
     }
 
     if (messages.length === 0) return payload;
 
-    // Oldest first
-    messages.sort((a, b) => a.createTime - b.createTime);
+    // New: compute total conversation length and optionally skip pruning
+    var totalConversationLen = 0;
+    for (var mi = 0; mi < messages.length; mi++) {
+      totalConversationLen += messages[mi].totalLen;
+    }
 
-    // Keep latest N messages untouched
-    const cutoffIndex = Math.max(0, messages.length - KEEP_RECENT_MESSAGES);
+    if (
+      messages.length < MIN_MESSAGES_FOR_PRUNE &&
+      totalConversationLen < MIN_CONVERSATION_LENGTH_FOR_PRUNE
+    ) {
+      console.log(
+        '[ChatGPT Crash Fix] Conversation small (messages=' +
+          messages.length +
+          ', totalLen=' +
+          totalConversationLen +
+          '), skipping prune'
+      );
+      return payload;
+    }
 
-    let prunedCount = 0;
+    messages.sort(function (a, b) {
+      return a.createTime - b.createTime;
+    });
 
-    for (let i = 0; i < cutoffIndex; i++) {
-      const entry = messages[i];
+    var cutoffIndex = Math.max(0, messages.length - KEEP_RECENT_MESSAGES);
+    var prunedCount = 0;
 
+    for (i = 0; i < cutoffIndex; i++) {
+      var entry = messages[i];
       if (entry.totalLen < MIN_TOTAL_LENGTH_FOR_TRIM) continue;
 
-      const parts = entry.parts;
-      for (let pi = 0; pi < parts.length; pi++) {
-        const part = parts[pi];
+      var partsToTrim = entry.parts;
+      for (var pi = 0; pi < partsToTrim.length; pi++) {
+        var part = partsToTrim[pi];
 
         if (typeof part === 'string') {
           if (part.length > MAX_CHARS_PER_PART) {
-            parts[pi] = part.slice(-MAX_CHARS_PER_PART);
+            partsToTrim[pi] = part.slice(part.length - MAX_CHARS_PER_PART);
             prunedCount++;
           }
         } else if (part && typeof part === 'object') {
           if (typeof part.text === 'string' && part.text.length > MAX_CHARS_PER_PART) {
-            part.text = part.text.slice(-MAX_CHARS_PER_PART);
+            part.text = part.text.slice(part.text.length - MAX_CHARS_PER_PART);
             prunedCount++;
           }
         }
@@ -137,10 +140,22 @@ console.log('injected ChatGPT crash fix v2', location.href);
 
     if (prunedCount > 0) {
       console.log(
-        `[ChatGPT Crash Fix] Pruned content in ${prunedCount} parts (old messages only)`
+        '[ChatGPT Crash Fix] Pruned content in ' +
+          prunedCount +
+          ' parts (old messages only, messages=' +
+          messages.length +
+          ', totalLen=' +
+          totalConversationLen +
+          ')'
       );
     } else {
-      console.log('[ChatGPT Crash Fix] Nothing to prune in this conversation payload');
+      console.log(
+        '[ChatGPT Crash Fix] Nothing to prune (messages=' +
+          messages.length +
+          ', totalLen=' +
+          totalConversationLen +
+          ')'
+      );
     }
 
     return payload;
@@ -152,44 +167,53 @@ console.log('injected ChatGPT crash fix v2', location.href);
       return;
     }
 
-    const origFetch = window.fetch;
+    var origFetch = window.fetch;
 
-    window.fetch = async function (input, init) {
-      const res = await origFetch.apply(this, arguments);
-
-      if (!pruningEnabled()) {
-        return res;
-      }
-
-      try {
-        const url = typeof input === 'string' ? input : (input && input.url) || '';
-        if (!isConversationUrl(url)) {
+    window.fetch = function (input, init) {
+      return origFetch(input, init).then(function (res) {
+        if (!pruningEnabled()) {
           return res;
         }
 
-        const ct = res.headers.get('content-type') || '';
-        if (!ct.includes('application/json')) {
+        try {
+          var url =
+            typeof input === 'string'
+              ? input
+              : (input && input.url) || '';
+
+          if (!isConversationUrl(url)) {
+            return res;
+          }
+
+          var ct =
+            res.headers && res.headers.get
+              ? res.headers.get('content-type') || ''
+              : '';
+          if (ct.indexOf('application/json') === -1) {
+            return res;
+          }
+
+          var clone = res.clone();
+          return clone.json().then(function (data) {
+            var pruned = pruneConversationPayload(data);
+            var body = JSON.stringify(pruned);
+            var headers = new Headers(res.headers || undefined);
+            headers.delete('content-length');
+
+            return new Response(body, {
+              status: res.status,
+              statusText: res.statusText,
+              headers: headers
+            });
+          }).catch(function (e) {
+            console.warn('[ChatGPT Crash Fix] Error reading JSON from clone:', e);
+            return res;
+          });
+        } catch (e) {
+          console.warn('[ChatGPT Crash Fix] Error while pruning fetch response:', e);
           return res;
         }
-
-        const clone = res.clone();
-        const data = await clone.json();
-
-        const pruned = pruneConversationPayload(data);
-        const body = JSON.stringify(pruned);
-
-        const headers = new Headers(res.headers);
-        headers.delete('content-length');
-
-        return new Response(body, {
-          status: res.status,
-          statusText: res.statusText,
-          headers
-        });
-      } catch (e) {
-        console.warn('[ChatGPT Crash Fix] Error while pruning fetch response:', e);
-        return res;
-      }
+      });
     };
 
     console.log('[ChatGPT Crash Fix] fetch() patched successfully');
@@ -198,10 +222,13 @@ console.log('injected ChatGPT crash fix v2', location.href);
   function install() {
     try {
       patchFetch();
-      console.log('[ChatGPT Crash Fix] Installation complete, waiting for conversation fetches…');
+      console.log(
+        '[ChatGPT Crash Fix] Installation complete, waiting for conversation fetches...'
+      );
     } catch (e) {
       console.error('[ChatGPT Crash Fix] install error:', e);
     }
   }
 
-  install()
+  install();
+})();
