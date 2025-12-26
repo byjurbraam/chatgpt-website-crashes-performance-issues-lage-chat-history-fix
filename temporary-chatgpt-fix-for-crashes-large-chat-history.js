@@ -14,107 +14,140 @@
   100% client-side. No backend changes. No bypassing.
   You can review, disable, or remove the script anytime.
 */
+// ==UserScript==
+// @name         ChatGPT fetch-prune heavy history (safe mapping + log)
+// @namespace    local.chatgpt.fetchprune
+// @version      1.3
+// @description  Intercept ChatGPT API responses and trim old message content without breaking the tree.
+// @author       you
+// @match        https://chatgpt.com/*
+// @run-at       document-start
+// @grant        none
+// ==/UserScript==
+
 (function () {
-  "use strict";
+  'use strict';
 
-  const INITIAL_VISIBLE_WINDOW_MINUTES = 5;
-  const PLACEHOLDER = "[older message available via History Viewer]";
-  const PRUNE_KEY = "chatgpt_history_optimizer_prune";
-  const DATA_PREFIX = "chatgpt_history_optimizer_conversation_";
+  console.log('[ChatGPT Crash Fix] Script loaded on', location.href);
 
-  console.log(
-    "%cChatGPT History Optimizer Loaded",
-    "background:#4ade80;color:#022c22;font-weight:bold;padding:6px;border-radius:6px;"
-  );
-  console.log(
-    "💡 Client-side only. Full history stays safe. If OpenAI asks, removal is immediate."
-  );
+  const STORAGE_KEY = 'chatgpt_pruneBigMessages';
 
-  const enable = () => localStorage.setItem(PRUNE_KEY, "1");
-  const disable = () => localStorage.setItem(PRUNE_KEY, "0");
-  const enabled = () => localStorage.getItem(PRUNE_KEY) !== "0";
-
-  window.ChatGPTHistoryOptimizer = {
-    status() {
-      return { enabled: enabled() };
-    },
-    enableOptimization() {
-      enable();
-      location.reload();
-    },
-    disableOptimization() {
-      disable();
-      location.reload();
-    },
-    clearCache() {
-      Object.keys(localStorage)
-        .filter((k) => k.startsWith(DATA_PREFIX))
-        .forEach((k) => localStorage.removeItem(k));
-      console.log("🗑️ Cache cleared");
-    },
-  };
-
-  const originalFetch = window.fetch;
-  window.fetch = async (...args) => {
-    const res = await originalFetch(...args);
-    if (!enabled()) return res;
-
-    const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
-    if (!url.includes("/backend-api/conversation")) return res;
-
+  // Enable pruning?
+  function pruningEnabled() {
     try {
-      const clone = res.clone();
-      const json = await clone.json();
-
-      if (json?.conversation_id) {
-        localStorage.setItem(
-          DATA_PREFIX + json.conversation_id,
-          JSON.stringify(json)
-        );
-      }
-
-      let newest = 0;
-      if (json && json.mapping) {
-        for (const key in json.mapping) {
-          const mt = json.mapping[key]?.message?.create_time;
-          if (typeof mt === "number" && mt > newest) newest = mt;
-        }
-      }
-
-      const limit = newest - INITIAL_VISIBLE_WINDOW_MINUTES * 60;
-
-      if (json && json.mapping) {
-        for (const key in json.mapping) {
-          const node = json.mapping[key];
-          const mt = node?.message?.create_time;
-          if (typeof mt === "number" && mt < limit) {
-            try {
-              if (node.message && node.message.content) {
-                node.message.content.parts = [PLACEHOLDER];
-              }
-            } catch (e) {
-              console.warn(
-                "[ChatGPT History Optimizer] Failed to apply placeholder on node:",
-                key,
-                e
-              );
-            }
-          }
-        }
-      }
-
-      const body = JSON.stringify(json);
-      return new Response(body, {
-        status: res.status,
-        statusText: res.statusText,
-        headers: res.headers,
-      });
-    } catch (error) {
-      console.warn(
-        "[ChatGPT History Optimizer] Error while processing response:",
-        error
-      );
-      return res;
+      const val = localStorage.getItem(STORAGE_KEY);
+      return val === null || val === '1' || val === 'true';
+    } catch {
+      return true;
     }
-  };
+  }
+
+  function isConversationUrl(url) {
+    if (!url) return false;
+    try {
+      const u = new URL(url, location.origin);
+      return u.pathname.startsWith('/backend-api/conversation');
+    } catch {
+      return false;
+    }
+  }
+
+  function pruneConversationPayload(payload) {
+    if (!payload || typeof payload !== 'object') return payload;
+    if (!payload.mapping || typeof payload.mapping !== 'object') return payload;
+
+    const mapping = payload.mapping;
+    const nodes = Object.values(mapping);
+    const messages = [];
+
+    for (const node of nodes) {
+      if (!node || typeof node !== 'object') continue;
+      const msg = node.message;
+      if (!msg || !msg.content) continue;
+
+      const parts = Array.isArray(msg.content.parts) ? msg.content.parts : null;
+      if (!parts || parts.length === 0) continue;
+
+      const time = typeof msg.create_time === 'number' ? msg.create_time : 0;
+      let totalLen = 0;
+      for (const p of parts) {
+        if (typeof p === 'string') totalLen += p.length;
+        else if (p && typeof p.text === 'string') totalLen += p.text.length;
+      }
+
+      messages.push({ node, parts, totalLen, time });
+    }
+
+    if (messages.length === 0) return payload;
+    messages.sort((a, b) => a.time - b.time);
+
+    const KEEP_RECENT = 10;
+    const MAX_PART_CHARS = 800;
+    const MIN_TOTAL_TRIM = 5000;
+    const cutoff = Math.max(0, messages.length - KEEP_RECENT);
+
+    for (let i = 0; i < cutoff; i++) {
+      const m = messages[i];
+      if (m.totalLen < MIN_TOTAL_TRIM) continue;
+      for (let j = 0; j < m.parts.length; j++) {
+        const part = m.parts[j];
+        if (typeof part === 'string') {
+          if (part.length > MAX_PART_CHARS) {
+            m.parts[j] = part.slice(-MAX_PART_CHARS);
+          }
+        } else if (part && typeof part.text === 'string' && part.text.length > MAX_PART_CHARS) {
+          part.text = part.text.slice(-MAX_PART_CHARS);
+        }
+      }
+    }
+
+    return payload;
+  }
+
+  function patchFetch() {
+    if (!window.fetch) return;
+    const origFetch = window.fetch;
+
+    window.fetch = async function (input, init) {
+      const res = await origFetch.apply(this, arguments);
+
+      if (!pruningEnabled()) return res;
+
+      try {
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        if (!isConversationUrl(url)) return res;
+
+        const ct = res.headers.get('content-type') || '';
+        if (!ct.includes('application/json')) return res;
+
+        const clone = res.clone();
+        const data = await clone.json();
+        const pruned = pruneConversationPayload(data);
+
+        const body = JSON.stringify(pruned);
+        const headers = new Headers(res.headers);
+        headers.delete('content-length');
+
+        return new Response(body, {
+          status: res.status,
+          statusText: res.statusText,
+          headers
+        });
+      } catch (e) {
+        console.warn('[ChatGPT Crash Fix] fetch prune error', e);
+        return res;
+      }
+    };
+  }
+
+  function install() {
+    try {
+      patchFetch();
+      console.log('[ChatGPT Crash Fix] Installed fetch patch');
+    } catch (e) {
+      console.error('[ChatGPT Crash Fix] install error', e);
+    }
+  }
+
+  install();
 })();
