@@ -16,8 +16,8 @@
 */
 console.log('injected ChatGPT crash fix', location.href);
 
-(function () {
-  'use strict';
+// Simple marker so we know THIS version is injected
+console.log('injected ChatGPT crash fix v2', location.href);
 
   // Prevent double-installation if this file is injected twice
   if (window.__CHATGPT_CRASH_FIX_INSTALLED__) {
@@ -158,8 +158,6 @@ console.log('injected ChatGPT crash fix', location.href);
       const res = await origFetch.apply(this, arguments);
 
       if (!pruningEnabled()) {
-        // Optional debug log if you want:
-        // console.log('[ChatGPT Crash Fix] Pruning disabled via localStorage');
         return res;
       }
 
@@ -174,7 +172,6 @@ console.log('injected ChatGPT crash fix', location.href);
           return res;
         }
 
-        // We consume the clone, not the original body
         const clone = res.clone();
         const data = await clone.json();
 
@@ -182,7 +179,6 @@ console.log('injected ChatGPT crash fix', location.href);
         const body = JSON.stringify(pruned);
 
         const headers = new Headers(res.headers);
-        // Let the browser recompute content-length
         headers.delete('content-length');
 
         return new Response(body, {
@@ -208,6 +204,4 @@ console.log('injected ChatGPT crash fix', location.href);
     }
   }
 
-  install();
-})();
-
+  install()
